@@ -1,0 +1,21 @@
+import dotenv from 'dotenv';
+
+dotenv.config();
+
+const requiredEnvVars = ['PORT', 'DATABASE_URL'];
+
+for (const envVar of requiredEnvVars) {
+  if (!process.env[envVar]) {
+    throw new Error(
+      `Fatal Startup Error: Missing required environment variable: ${envVar}. Please check your .env configuration.`
+    );
+  }
+}
+
+export const config = {
+  port: parseInt(process.env.PORT, 10) || 3000,
+  databaseUrl: process.env.DATABASE_URL,
+  nodeEnv: process.env.NODE_ENV || 'development',
+};
+
+export default config;
