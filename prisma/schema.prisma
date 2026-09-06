@@ -6,3 +6,77 @@ datasource db {
   provider = "postgresql"
   url      = env("DATABASE_URL")
 }
+
+enum UserRole {
+  USER
+  ADMIN
+}
+
+enum JobStatus {
+  QUEUED
+  PROCESSING
+  COMPLETED
+  FAILED
+  CANCELLED
+}
+
+enum JobPriority {
+  HIGH
+  NORMAL
+  LOW
+}
+
+enum AttemptStatus {
+  PROCESSING
+  COMPLETED
+  FAILED
+}
+
+model User {
+  id        String   @id @default(uuid())
+  name      String
+  email     String   @unique
+  password  String
+  role      UserRole @default(USER)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+  jobs      Job[]
+}
+
+model Job {
+  id           String       @id @default(uuid())
+  userId       String
+  user         User         @relation(fields: [userId], references: [id], onDelete: Restrict)
+  type         String
+  payload      Json
+  status       JobStatus    @default(QUEUED)
+  priority     JobPriority  @default(NORMAL)
+  attempts     Int          @default(0)
+  maxAttempts  Int          @default(3)
+  errorMessage String?
+  createdAt    DateTime     @default(now())
+  updatedAt    DateTime     @updatedAt
+  startedAt    DateTime?
+  completedAt  DateTime?
+  failedAt     DateTime?
+  jobAttempts  JobAttempt[]
+
+  @@index([userId])
+  @@index([status])
+  @@index([createdAt])
+}
+
+model JobAttempt {
+  id            String        @id @default(uuid())
+  jobId         String
+  job           Job           @relation(fields: [jobId], references: [id], onDelete: Cascade)
+  attemptNumber Int
+  status        AttemptStatus
+  errorMessage  String?
+  createdAt     DateTime      @default(now())
+  startedAt     DateTime?
+  completedAt   DateTime?
+
+  @@unique([jobId, attemptNumber])
+  @@index([jobId])
+}
