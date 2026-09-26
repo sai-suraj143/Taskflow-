@@ -1,4 +1,5 @@
 import prisma from '../lib/prisma.js';
+import jobQueue from '../queues/jobQueue.js';
 
 const createServiceError = (message, status) => {
   const error = new Error(message);
@@ -6,8 +7,8 @@ const createServiceError = (message, status) => {
   return error;
 };
 
-export const createJob = ({ userId, type, payload, priority }) => {
-  return prisma.job.create({
+export const createJob = async ({ userId, type, payload, priority }) => {
+  const job = await prisma.job.create({
     data: {
       userId,
       type,
@@ -15,6 +16,21 @@ export const createJob = ({ userId, type, payload, priority }) => {
       ...(priority ? { priority } : {}),
     },
   });
+
+  // Known limitation for this milestone: if this enqueue fails, the job row is already
+  // committed in Postgres and stays QUEUED forever with no worker ever notified. A proper
+  // fix (outbox pattern / reconciliation sweep) is deferred to a future milestone and is
+  // deliberately NOT implemented here, so this failure is reported loudly instead.
+  try {
+    await jobQueue.add('process-job', { jobId: job.id });
+  } catch (err) {
+    console.error(
+      `[CRITICAL] Job ${job.id} created in DB but failed to enqueue:`,
+      err
+    );
+  }
+
+  return job;
 };
 
 export const listJobs = async ({ userId, role, page, limit }) => {
