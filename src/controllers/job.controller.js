@@ -1,5 +1,16 @@
-import { createJob, listJobs, getJobById, cancelJob } from '../services/job.service.js';
-import { serializeJob, serializeJobList } from '../utils/jobSerializer.js';
+import {
+  createJob,
+  listJobs,
+  getJobById,
+  cancelJob,
+  getJobAttempts,
+  retryJob,
+} from '../services/job.service.js';
+import {
+  serializeJob,
+  serializeJobList,
+  serializeJobAttemptList,
+} from '../utils/jobSerializer.js';
 import { isValidJobType, JOB_TYPES } from '../constants/jobTypes.js';
 
 const createValidationError = (message) => {
@@ -85,6 +96,34 @@ export const cancel = async (req, res, next) => {
       role: req.user.role,
     });
     return res.status(200).json({ data: serializeJob(job) });
+  } catch (error) {
+    return next(error);
+  }
+};
+
+export const listAttempts = async (req, res, next) => {
+  try {
+    const attempts = await getJobAttempts({
+      jobId: req.params.id,
+      userId: req.user.id,
+      role: req.user.role,
+    });
+    return res.status(200).json({ data: serializeJobAttemptList(attempts) });
+  } catch (error) {
+    return next(error);
+  }
+};
+
+export const retry = async (req, res, next) => {
+  try {
+    const job = await retryJob({
+      jobId: req.params.id,
+      userId: req.user.id,
+      role: req.user.role,
+    });
+    // 202, not 200: the job has been accepted back into the queue but has not run.
+    // The work is still pending, exactly like a freshly created job.
+    return res.status(202).json({ data: serializeJob(job) });
   } catch (error) {
     return next(error);
   }

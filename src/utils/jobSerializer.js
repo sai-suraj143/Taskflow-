@@ -16,3 +16,16 @@ export const serializeJob = (job) => ({
 });
 
 export const serializeJobList = (jobs) => jobs.map(serializeJob);
+
+export const serializeJobAttempt = (attempt) => ({
+  id: attempt.id,
+  jobId: attempt.jobId,
+  attemptNumber: attempt.attemptNumber,
+  status: attempt.status,
+  errorMessage: attempt.errorMessage,
+  startedAt: attempt.startedAt,
+  completedAt: attempt.completedAt,
+  createdAt: attempt.createdAt,
+});
+
+export const serializeJobAttemptList = (attempts) => attempts.map(serializeJobAttempt);
