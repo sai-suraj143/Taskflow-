@@ -13,6 +13,9 @@ export const serializeJob = (job) => ({
   startedAt: job.startedAt,
   completedAt: job.completedAt,
   failedAt: job.failedAt,
+  // null for any job created without an Idempotency-Key header, since the feature is
+  // opt-in. Exposed so a client that used a key can correlate its own retries.
+  idempotencyKey: job.idempotencyKey,
 });
 
 export const serializeJobList = (jobs) => jobs.map(serializeJob);

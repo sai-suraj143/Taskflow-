@@ -46,6 +46,11 @@ export const config = {
   // RETRY_BACKOFF_BASE_MS * 2^(n-1). Known limitation: BullMQ's built-in
   // exponential backoff has no jitter, so retrying jobs can stampede Redis.
   retryBackoffBaseMs: parseOptionalPositiveInt('RETRY_BACKOFF_BASE_MS', 1000),
+  // Rate limit for POST /api/jobs, applied per authenticated user. A window of 0
+  // would divide by zero when computing the window bucket and a max of 0 would reject
+  // every request, so both are parsed through the same strict positive-int guard.
+  rateLimitWindowSeconds: parseOptionalPositiveInt('RATE_LIMIT_WINDOW_SECONDS', 60),
+  rateLimitMaxRequests: parseOptionalPositiveInt('RATE_LIMIT_MAX_REQUESTS', 100),
 };
 
 export default config;

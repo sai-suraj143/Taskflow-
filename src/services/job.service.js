@@ -9,22 +9,105 @@ const createServiceError = (message, status) => {
   return error;
 };
 
-export const createJob = async ({ userId, type, payload, priority }) => {
-  const job = await prisma.job.create({
-    data: {
-      userId,
-      type,
-      payload,
-      ...(priority ? { priority } : {}),
-    },
-  });
+// True only if this Prisma error is a unique-constraint violation on exactly the
+// @@unique([userId, idempotencyKey]) constraint.
+//
+// P2002 alone is NOT enough to conclude "idempotent replay": the schema has other
+// unique constraints (User.email, JobAttempt [jobId, attemptNumber], and the Job
+// primary key), and a P2002 on any of those must keep propagating as a real error
+// rather than being misreported as a harmless replay.
+//
+// Prisma reports the violated columns in error.meta.target as an array of column
+// names (e.g. ["userId", "idempotencyKey"]). Both columns are required so a future
+// constraint that covers only one of them can never be mistaken for this one. The
+// field is normalised defensively because some drivers report it as a plain string.
+const isIdempotencyConflict = (error) => {
+  if (!error || error.code !== 'P2002') {
+    return false;
+  }
+
+  const { target } = error.meta ?? {};
+  const columns = Array.isArray(target) ? target : [target];
+
+  return columns.includes('userId') && columns.includes('idempotencyKey');
+};
+
+export const createJob = async ({ userId, type, payload, priority, idempotencyKey }) => {
+  // Idempotency is opt-in per request. When no key is supplied the create is
+  // completely unchanged from the pre-idempotency behaviour.
+  const hasIdempotencyKey =
+    idempotencyKey !== undefined && idempotencyKey !== null && idempotencyKey !== '';
+
+  let job;
+
+  if (!hasIdempotencyKey) {
+    job = await prisma.job.create({
+      data: {
+        userId,
+        type,
+        payload,
+        ...(priority ? { priority } : {}),
+      },
+    });
+  } else {
+    // INSERT-then-catch, deliberately not check-then-insert.
+    //
+    // The obvious implementation is to SELECT for an existing (userId, idempotencyKey)
+    // row first and only INSERT if none is found. That has a race: two concurrent
+    // requests with the same key can both run the SELECT, both observe "no row", and
+    // both proceed to INSERT. The database then has to arbitrate, and one client gets
+    // a raw unique-constraint error it has no idea how to interpret.
+    //
+    // This way the INSERT itself is the claim. Postgres serialises the two inserts on
+    // the unique index, exactly one wins, and the loser is told precisely why it lost
+    // (P2002 on this constraint) instead of having to guess. The race is closed by the
+    // database rather than by a check that is stale by the time it is acted on.
+    try {
+      job = await prisma.job.create({
+        data: {
+          userId,
+          type,
+          payload,
+          ...(priority ? { priority } : {}),
+          idempotencyKey,
+        },
+      });
+    } catch (error) {
+      if (!isIdempotencyConflict(error)) {
+        // Not a duplicate key (or a P2002 on some unrelated constraint such as a
+        // different unique index). Rethrow untouched: swallowing a real database
+        // failure here would report a phantom "replay" and hide the actual error.
+        throw error;
+      }
+
+      // The row exists, so either this is a genuine replay of an earlier request or a
+      // concurrent request that won the insert race. Both cases are answered with the
+      // one canonical job, so the client always converges on a single id.
+      const existingJob = await prisma.job.findUnique({
+        where: { userId_idempotencyKey: { userId, idempotencyKey } },
+      });
+
+      if (!existingJob) {
+        // The conflicting row vanished between the failed insert and this read. That
+        // should be practically impossible under normal operation, so rather than
+        // returning a null job to the controller, surface the original database error.
+        throw error;
+      }
+
+      return { job: existingJob, isReplay: true };
+    }
+  }
 
   // Known limitation for this milestone: if this enqueue fails, the job row is already
   // committed in Postgres and stays QUEUED forever with no worker ever notified. A proper
   // fix (outbox pattern / reconciliation sweep) is deferred to a future milestone and is
   // deliberately NOT implemented here, so this failure is reported loudly instead.
   try {
-    await enqueueJob({ jobId: job.id, remainingAttempts: job.maxAttempts });
+    await enqueueJob({
+      jobId: job.id,
+      remainingAttempts: job.maxAttempts,
+      priority: job.priority,
+    });
   } catch (err) {
     console.error(
       `[CRITICAL] Job ${job.id} created in DB but failed to enqueue:`,
@@ -32,7 +115,9 @@ export const createJob = async ({ userId, type, payload, priority }) => {
     );
   }
 
-  return job;
+  // Only reachable when this request was the one that created the row: a replay
+  // returned earlier, above.
+  return { job, isReplay: false };
 };
 
 export const listJobs = async ({ userId, role, page, limit }) => {
@@ -151,6 +236,7 @@ export const retryJob = async ({ jobId, userId, role }) => {
     await enqueueJob({
       jobId,
       remainingAttempts: retriedJob.maxAttempts - retriedJob.attempts,
+      priority: retriedJob.priority,
     });
   } catch (err) {
     console.error(
