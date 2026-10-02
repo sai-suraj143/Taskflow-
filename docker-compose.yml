@@ -10,6 +10,20 @@ services:
       - "5432:5432"
     volumes:
       - postgres_data:/var/lib/postgresql/data
+      # Creates the Jest database alongside the dev one. IMPORTANT: init scripts here run
+      # ONLY when the data directory is empty, so on an existing volume this is a no-op.
+      # The guaranteed-no-data-loss path is `npm run db:create:test`, which pipes the
+      # exact same file into psql on demand and is idempotent either way.
+      - ./docker/postgres-init:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      # Added in Day 9: `depends_on: condition: service_healthy` cannot be used for a
+      # service that has no healthcheck. pg_isready validates a real connection, so the
+      # api/worker containers never start against a postgres that is still initialising.
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER} -d ${POSTGRES_DB}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
 
   redis:
     image: redis:7-alpine
@@ -19,6 +33,99 @@ services:
       - "6379:6379"
     volumes:
       - redis_data:/data
+    healthcheck:
+      # Added in Day 9, same reason as postgres: PING proves the server accepts commands,
+      # not merely that the process is alive.
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+      start_period: 5s
+
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    # Explicit tag so the worker service reuses this exact image instead of triggering a
+    # second (identical) build. Only `api` declares `build:`.
+    image: taskflow:latest
+    container_name: taskflow-api
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    env_file:
+      # The host .env is passed through so JWT_SECRET and the tuning knobs are defined in
+      # exactly one place. `environment:` below then overrides only the two values that
+      # MUST differ inside the compose network, and `environment` always wins over
+      # `env_file`. .env itself is NOT modified for container use.
+      - ./.env
+    environment:
+      # Inter-container traffic uses compose's service-name DNS, NOT localhost: each
+      # container has its own loopback. This is the single most important line here.
+      DATABASE_URL: postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}?schema=public
+      REDIS_URL: redis://redis:6379
+      PORT: 3000
+    ports:
+      - "3000:3000"
+    command: sh -c "npx prisma migrate deploy && node src/server.js"
+    healthcheck:
+      # The alpine image has no curl, so the check uses Node's global fetch (Node 22).
+      # Hitting /health (not just TCP) also proves the api can reach both dependencies.
+      test:
+        [
+          "CMD",
+          "node",
+          "-e",
+          "fetch('http://127.0.0.1:3000/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))",
+        ]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+
+  worker:
+    # Same image tag as api -> no second build. `docker compose up --build` builds it once
+    # via the api service and the worker starts from that image.
+    image: taskflow:latest
+    container_name: taskflow-worker
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      # BEST EFFORT, NOT A GUARANTEE. The schema only exists after api's
+      # `prisma migrate deploy` finishes, and `service_started` fires the moment the api
+      # container is created — i.e. while migrations are still running. Narrowing the race
+      # is all compose can do here; a production system would gate the worker on a
+      # dedicated one-shot migration job (or an init container the worker waits on) rather
+      # than on a sibling's start event.
+      api:
+        condition: service_started
+    env_file:
+      - ./.env
+    environment:
+      DATABASE_URL: postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}?schema=public
+      REDIS_URL: redis://redis:6379
+    # No migration step here on purpose: two services racing to migrate the same database
+    # is a known source of deadlocks and half-applied schema changes.
+    command: node src/worker.js
+    restart: unless-stopped
+    healthcheck:
+      # A worker has no HTTP surface. What it actually depends on is a reachable Redis,
+      # so the liveness check verifies that rather than being a no-op.
+      test:
+        [
+          "CMD",
+          "node",
+          "-e",
+          "const R=require('ioredis');const r=new R(process.env.REDIS_URL,{maxRetriesPerRequest:1});r.ping().then(()=>r.quit().then(()=>process.exit(0))).catch(()=>process.exit(1))",
+        ]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 15s
 
 volumes:
   postgres_data:
